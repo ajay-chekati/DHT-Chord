@@ -608,19 +608,38 @@ class Node:
             resp = await self.rpc_client.call(succ, {"type": "GET_PREDECESSOR", "payload": {}}, timeout=config.RPC_TIMEOUT)
             if resp.get("ok"):
                 node = resp["result"]["node"]
+                adopted = False
                 if node:
                     x = NodeInfo(int(node["id"]), node["host"], node["port"])
-                    # if x is between self and successor, adopt x
-                    if in_interval(self.id, succ.id, x.id, inclusive_start=False, inclusive_end=False, m=self.routing.m):
+                    # handle degenerate self-successor case (single-node ring)
+                    if succ == self.info and x != self.info:
                         self.successor = x
-                # notify successor
-            # notify successor that I might be its predecessor
-            await self.rpc_client.call(self.successor, {"type": "NOTIFY", "payload": {"node": {"id": self.id, "host": self.host, "port": self.port}}}, timeout=config.RPC_TIMEOUT)
+                        adopted = True
+                    # if x is between self and successor, adopt x
+                    elif in_interval(self.id, succ.id, x.id, inclusive_start=False, inclusive_end=False, m=self.routing.m):
+                        self.successor = x
+                        adopted = True
+                if adopted:
+                    self.succ_list.update_with(self.successor)
+                    succ = self.successor
+
+            successor_for_notify = self.successor
+            if successor_for_notify and successor_for_notify != self.info:
+                # notify successor that I might be its predecessor
+                await self.rpc_client.call(
+                    successor_for_notify,
+                    {"type": "NOTIFY", "payload": {"node": {"id": self.id, "host": self.host, "port": self.port}}},
+                    timeout=config.RPC_TIMEOUT,
+                )
             try:
-                chain = await self._fetch_successor_chain(self.successor)
+                if self.successor:
+                    chain = await self._fetch_successor_chain(self.successor)
+                else:
+                    chain = []
                 self._refresh_successor_list_from_chain(chain)
             except Exception:
-                self.succ_list.update_with(self.successor)
+                if self.successor:
+                    self.succ_list.update_with(self.successor)
         except Exception:
             # successor failed -> try next in succ_list
             for candidate in self.succ_list.all()[1:]:
@@ -638,6 +657,8 @@ class Node:
         If you have no predecessor or candidate is between your predecessor and you, update.
         Also: upon a graceful leave/transfer you'd implement key transfer here.
         """
+        if candidate == self.info:
+            return
         if self.predecessor is None:
             self.predecessor = candidate
         else:
