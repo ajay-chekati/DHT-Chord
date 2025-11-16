@@ -172,8 +172,16 @@ class Node:
                 return {"ok": True, "result": {"type": "PONG", "node": {"id": self.id, "host": self.host, "port": self.port}}}
             if t == "FIND_SUCCESSOR":
                 target = int(p["id"])
-                succ, hops = await self._find_successor_internal(target)
-                return {"ok": True, "result": {"node": {"id": succ.id, "host": succ.host, "port": succ.port}, "hops": hops}}
+                succ, trace = await self._find_successor_internal(target)
+                trace_payload = [self._nodeinfo_to_dict(n) for n in trace]
+                return {
+                    "ok": True,
+                    "result": {
+                        "node": {"id": succ.id, "host": succ.host, "port": succ.port},
+                        "hops": max(0, len(trace_payload) - 1),
+                        "trace": trace_payload,
+                    },
+                }
             if t == "GET_PREDECESSOR":
                 if self.predecessor:
                     return {"ok": True, "result": {"node": {"id": self.predecessor.id, "host": self.predecessor.host, "port": self.predecessor.port}}}
@@ -197,14 +205,24 @@ class Node:
             if t == "ROUTE_PUT":
                 key = int(p["key"])
                 meta = Metadata.from_dict(p["meta"])
-                await self.put(key, meta)
-                return {"ok": True, "result": {"key": key}}
+                primary, trace, replicas = await self.put_with_trace(key, meta)
+                return {
+                    "ok": True,
+                    "result": {
+                        "key": key,
+                        "primary": self._nodeinfo_to_dict(primary),
+                        "trace": [self._nodeinfo_to_dict(n) for n in trace],
+                        "replicas": [self._nodeinfo_to_dict(n) for n in replicas],
+                    },
+                }
             if t == "ROUTE_GET":
                 key = int(p["key"])
-                vals = await self.get(key)
-                if vals is None:
-                    return {"ok": True, "result": {"values": None}}
-                return {"ok": True, "result": {"values": [v.to_dict() for v in vals]}}
+                vals, trace = await self.get_with_trace(key)
+                payload = {
+                    "values": None if vals is None else [v.to_dict() for v in vals],
+                    "trace": [self._nodeinfo_to_dict(n) for n in trace],
+                }
+                return {"ok": True, "result": payload}
             if t == "GET_SUCCESSOR_LIST":
                 nodes = [self._nodeinfo_to_dict(n) for n in self._current_successor_chain()]
                 return {"ok": True, "result": {"nodes": [n for n in nodes if n is not None]}}
@@ -383,6 +401,19 @@ class Node:
             out.append(n)
         return out
 
+    def _merge_trace(self, base: List[NodeInfo], extra: List[NodeInfo]) -> List[NodeInfo]:
+        out: List[NodeInfo] = list(base)
+        seen = {(node.id, node.host, node.port) for node in out}
+        for node in extra:
+            if node is None:
+                continue
+            key = (node.id, node.host, node.port)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(node)
+        return out
+
     def _successor_candidates(self) -> List[NodeInfo]:
         candidates: List[NodeInfo] = []
         seen = set()
@@ -554,9 +585,13 @@ class Node:
             start_id = (self.id - 1) % (1 << self.routing.m)
         await self._request_keys_from_successor(start_id, self.id)
 
-    async def _find_successor_internal(self, id_: int) -> Tuple[NodeInfo, int]:
+    async def _find_successor_internal(self, id_: int) -> Tuple[NodeInfo, List[NodeInfo]]:
+        trace: List[NodeInfo] = [self.info]
         if self.successor and in_interval(self.id, self.successor.id, id_, inclusive_start=False, inclusive_end=True, m=self.routing.m):
-            return self.successor, 0
+            succ = self.successor
+            if succ != self.info:
+                trace.append(succ)
+            return succ, trace
 
         attempted = set()
         payload = {"type": "FIND_SUCCESSOR", "payload": {"id": id_}}
@@ -575,16 +610,39 @@ class Node:
                 if resp.get("ok"):
                     node = self._nodeinfo_from_dict(resp.get("result", {}).get("node"))
                     if node:
-                        hops = int(resp.get("result", {}).get("hops", 0)) + 1
-                        return node, hops
+                        remote_payload = resp.get("result", {}).get("trace")
+                        remote_trace: List[NodeInfo] = []
+                        if isinstance(remote_payload, list):
+                            for entry in remote_payload:
+                                ni = self._nodeinfo_from_dict(entry)
+                                if ni:
+                                    remote_trace.append(ni)
+                        if not remote_trace:
+                            remote_trace = [candidate]
+                            if node != candidate:
+                                remote_trace.append(node)
+                        combined_trace = self._merge_trace(trace, remote_trace)
+                        if node and (not combined_trace or combined_trace[-1] != node):
+                            combined_trace.append(node)
+                        return node, combined_trace
             # if no candidates succeeded, loop to retry with refreshed data
 
         if self.successor:
-            return self.successor, 0
-        return self.info, 0
+            succ = self.successor
+            if succ != self.info:
+                trace.append(succ)
+            if succ and (not trace or trace[-1] != succ):
+                trace.append(succ)
+            return succ, trace
+        if not trace or trace[-1] != self.info:
+            trace.append(self.info)
+        return self.info, trace
+
+    async def find_successor_with_trace(self, id_: int) -> Tuple[NodeInfo, List[NodeInfo]]:
+        return await self._find_successor_internal(id_)
 
     async def find_successor(self, id_: int) -> NodeInfo:
-        node, _ = await self._find_successor_internal(id_)
+        node, _ = await self.find_successor_with_trace(id_)
         return node
 
     # ---------------- maintenance loops ----------------
@@ -764,15 +822,24 @@ class Node:
                     continue
 
     # ---------------- DHT ops ----------------
-    async def put(self, key: int, meta: Metadata) -> None:
+    async def _put(
+        self, key: int, meta: Metadata, include_trace: bool = False
+    ) -> Tuple[NodeInfo, List[NodeInfo], List[NodeInfo]]:
         """
-        Route to successor and store metadata there. Also replicate to next r-1 successors.
+        Internal PUT that optionally collects routing trace information.
+        Returns tuple of (primary_node, trace, replication_targets).
         """
         self._register_local_publication(key, meta)
-        target = await self.find_successor(key)
+        if include_trace:
+            target, trace = await self.find_successor_with_trace(key)
+        else:
+            target = await self.find_successor(key)
+            trace = []
+
         payload = {"type": "PUT", "payload": {"key": key, "meta": meta.to_dict()}}
 
         primary_written = False
+        primary_node = target
         if target == self.info:
             self.storage.put(key, meta)
             primary_written = True
@@ -789,14 +856,18 @@ class Node:
             if self._owns_primary_responsibility(key):
                 self.storage.put(key, meta)
                 primary_written = True
+                primary_node = self.info
             else:
                 raise RuntimeError("failed to write primary replica")
 
+        if include_trace:
+            trace = self._merge_trace(trace, [primary_node])
+
         # replicate to additional successors
         try:
-            chain = await self._fetch_successor_chain(target)
+            chain = await self._fetch_successor_chain(primary_node)
         except Exception:
-            chain = [target]
+            chain = [primary_node]
         # extend with local knowledge in case remote chain short
         for extra in self._current_successor_chain():
             if extra not in chain:
@@ -814,40 +885,74 @@ class Node:
                 # background repair will retry
                 continue
 
+        return primary_node, trace, replication_targets
+
+    async def put_with_trace(self, key: int, meta: Metadata) -> Tuple[NodeInfo, List[NodeInfo], List[NodeInfo]]:
+        return await self._put(key, meta, include_trace=True)
+
+    async def put(self, key: int, meta: Metadata) -> None:
+        """
+        Route to successor and store metadata there. Also replicate to next r-1 successors.
+        """
+        await self._put(key, meta, include_trace=False)
+
+    async def get_with_trace(self, key: int) -> Tuple[Optional[List[Metadata]], List[NodeInfo]]:
+        """
+        Find successor, retrieve metadata, and include the routing trace.
+        """
+        target, trace = await self.find_successor_with_trace(key)
+        trace_nodes: List[NodeInfo] = list(trace)
+        seen = {(node.id, node.host, node.port) for node in trace_nodes}
+
+        def add_trace(node: Optional[NodeInfo], *, force: bool = False) -> None:
+            if node is None:
+                return
+            key_tuple = (node.id, node.host, node.port)
+            if force or key_tuple not in seen:
+                trace_nodes.append(node)
+                seen.add(key_tuple)
+
+        add_trace(target, force=True)
+        try:
+            resp = await self.rpc_client.call(target, {"type": "GET", "payload": {"key": key}}, timeout=config.RPC_TIMEOUT)
+        except Exception:
+            resp = None
+
+        if resp and resp.get("ok"):
+            vals = resp["result"]["values"]
+            if vals:
+                return [Metadata.from_dict(d) for d in vals], trace_nodes
+            for successor in self.succ_list.all()[1:]:
+                add_trace(successor)
+                try:
+                    r2 = await self.rpc_client.call(successor, {"type": "GET", "payload": {"key": key}}, timeout=config.RPC_TIMEOUT)
+                except Exception:
+                    continue
+                if r2.get("ok") and r2["result"]["values"]:
+                    return [Metadata.from_dict(d) for d in r2["result"]["values"]], trace_nodes
+            return None, trace_nodes
+
+        local = self.storage.get(key)
+        if local:
+            return local, trace_nodes
+
+        for successor in self.succ_list.all():
+            add_trace(successor)
+            try:
+                r2 = await self.rpc_client.call(successor, {"type": "GET", "payload": {"key": key}}, timeout=config.RPC_TIMEOUT)
+            except Exception:
+                continue
+            if r2.get("ok") and r2["result"]["values"]:
+                return [Metadata.from_dict(d) for d in r2["result"]["values"]], trace_nodes
+
+        return None, trace_nodes
+
     async def get(self, key: int) -> Optional[List[Metadata]]:
         """
         Find successor and ask for key. If not found, try successors in successor list.
         """
-        target = await self.find_successor(key)
-        try:
-            resp = await self.rpc_client.call(target, {"type": "GET", "payload": {"key": key}}, timeout=config.RPC_TIMEOUT)
-            if resp.get("ok"):
-                vals = resp["result"]["values"]
-                if vals is None:
-                    # fallback to successors
-                    for s in self.succ_list.all()[1:]:
-                        try:
-                            r2 = await self.rpc_client.call(s, {"type": "GET", "payload": {"key": key}}, timeout=config.RPC_TIMEOUT)
-                            if r2.get("ok") and r2["result"]["values"]:
-                                return [Metadata.from_dict(d) for d in r2["result"]["values"]]
-                        except Exception:
-                            continue
-                    return None
-                return [Metadata.from_dict(d) for d in vals]
-        except Exception:
-            # try local (maybe I have it)
-            local = self.storage.get(key)
-            if local:
-                return local
-            # try successor list
-            for s in self.succ_list.all():
-                try:
-                    r2 = await self.rpc_client.call(s, {"type": "GET", "payload": {"key": key}}, timeout=config.RPC_TIMEOUT)
-                    if r2.get("ok") and r2["result"]["values"]:
-                        return [Metadata.from_dict(d) for d in r2["result"]["values"]]
-                except Exception:
-                    continue
-            return None
+        values, _ = await self.get_with_trace(key)
+        return values
 
     # ---------------- debug / helpers ----------------
     def info_str(self) -> str:

@@ -1,5 +1,5 @@
 # config.py
-M: int = 32                # small for local tests; use 160 for real runs (sha1)
+M: int = 32                
 REPLICATION: int = 3       # store metadata on primary + next r-1 successors
 RPC_TIMEOUT: float = 2.0
 STABILIZE_INTERVAL: float = 1.0

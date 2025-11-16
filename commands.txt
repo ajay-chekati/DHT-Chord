@@ -1,0 +1,21 @@
+1. create 20 nodes on ports starting from 6000:
+    ./scripts/launch_nodes.sh 20 6000 
+
+2. visualize the chord-DHT ring
+    python ./scripts/visualize_ring.py --host 127.0.0.1 --bootstrap 6000 --max-nodes 1024
+
+3. generate 100 txt files for testing
+    python ./scripts/generate_files.py
+
+4. Publish all files in the ./scripts/files folder to the network
+    ./scripts/publish_folder.py
+
+5. start a node: python cli.py start --host 127.0.0.1 --port 6000
+second node: python cli.py start --host 127.0.0.1 --port 6001 --bootstrap 127.0.0.1:6000
+
+6. put a file: python cli.py put --host 127.0.0.1 --port 6000 --file ./scripts/files/doc_01.txt
+
+7. file lookup: python cli.py get --host 127.0.0.1 --port 6002 --key 1217246485
+
+8. get pid of process running on a port: lsof -ti tcp:6005
+9. kill the process: kill pid

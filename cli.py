@@ -66,7 +66,18 @@ async def publish_file(node_host: str, node_port: int, filepath: str):
     if not resp.get("ok"):
         print(f"[-] Remote node error: {resp.get('error')}", file=sys.stderr)
         return
-    print(f"[+] Published {meta.filename}, key={key}")
+    result = resp.get("result", {}) or {}
+    primary = result.get("primary") or {}
+    primary_host = primary.get("host", node_host)
+    primary_port = primary.get("port", node_port)
+    replicas = []
+    for entry in result.get("replicas") or []:
+        h = entry.get("host")
+        p = entry.get("port")
+        if h is not None and p is not None:
+            replicas.append(f"{h}:{p}")
+    replica_note = f" (replicas: {', '.join(replicas)})" if replicas else ""
+    print(f"[+] Published {meta.filename}, key={key}, primary={primary_host}:{primary_port}{replica_note}")
 
 async def fetch_file(node_host: str, node_port: int, key: int):
     client = RPCClient()
@@ -83,7 +94,21 @@ async def fetch_file(node_host: str, node_port: int, key: int):
     if not resp.get("ok"):
         print(f"[-] Remote node error: {resp.get('error')}", file=sys.stderr)
         return
-    values = resp.get("result", {}).get("values")
+    result = resp.get("result", {}) or {}
+    trace = result.get("trace") or []
+    formatted_trace = []
+    for entry in trace:
+        host = entry.get("host")
+        port = entry.get("port")
+        node_id = entry.get("id")
+        if host is None or port is None or node_id is None:
+            continue
+        formatted_trace.append(f"{host}:{port} (id={node_id})")
+    if formatted_trace:
+        hops = max(0, len(formatted_trace) - 1)
+        print(f"[route] hops={hops}: " + " -> ".join(formatted_trace))
+
+    values = result.get("values")
     if not values:
         print(f"[-] File key {key} not found")
         return

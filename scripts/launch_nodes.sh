@@ -1,19 +1,31 @@
 #!/usr/bin/env bash
 # launch_nodes.sh
-# Usage: ./launch_nodes.sh 8 6000
+# Usage: ./scripts/launch_nodes.sh 8 6000 127.0.0.1
+
+set -euo pipefail
+
 N=${1:-8}
 START=${2:-6000}
+HOST=${3:-127.0.0.1}
 LOGDIR=logs
-mkdir -p $LOGDIR
-for i in $(seq 0 $((N-1))); do
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+CLI_PATH="$PROJECT_ROOT/cli.py"
+PYTHON_BIN=${PYTHON:-python}
+
+mkdir -p "$LOGDIR"
+
+for i in $(seq 0 $((N - 1))); do
   PORT=$((START + i))
+  LOG_FILE="$LOGDIR/node-$PORT.log"
   if [ $i -eq 0 ]; then
-    # bootstrap node
-    python ../cli.py start --host 127.0.0.1 --port $PORT > $LOGDIR/node-$PORT.log 2>&1 &
+    "$PYTHON_BIN" "$CLI_PATH" start --host "$HOST" --port "$PORT" >"$LOG_FILE" 2>&1 &
   else
-    python ../cli.py start --host 127.0.0.1 --port $PORT --bootstrap 127.0.0.1:$START > $LOGDIR/node-$PORT.log 2>&1 &
+    "$PYTHON_BIN" "$CLI_PATH" start --host "$HOST" --port "$PORT" --bootstrap "$HOST:$START" >"$LOG_FILE" 2>&1 &
   fi
-  echo "Started node on port $PORT (logs: $LOGDIR/node-$PORT.log)"
+  echo "Started node on port $PORT (logs: $LOG_FILE)"
   sleep 0.2
 done
-echo "Launched $N nodes starting at port $START"
+
+echo "Launched $N nodes starting at port $START (host=$HOST)"

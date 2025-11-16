@@ -1,4 +1,3 @@
-# network.py
 import asyncio
 import json
 from typing import Callable, Awaitable, Dict, Any, Tuple
@@ -14,7 +13,6 @@ class NodeInfo:
     host: str
     port: int
 
-# RPC Server ---------------------------------------------------------
 class RPCServer:
     def __init__(self, host: str, port: int, handler: Callable[[Dict[str, Any], Tuple[str,int]], Awaitable[Dict[str,Any]]]):
         self.host = host
@@ -60,7 +58,6 @@ class RPCServer:
             await self._server.wait_closed()
             self._server = None
 
-# RPC Client ---------------------------------------------------------
 class RPCClient:
     async def call(self, node: NodeInfo, message: Dict[str, Any], timeout: float = 2.0) -> Dict[str, Any]:
         """
