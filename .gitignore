@@ -3,3 +3,4 @@ __pycache__
 /files
 ./DS_Store
 scripts/files/DS_Store
+./scripts/logs

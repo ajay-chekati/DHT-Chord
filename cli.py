@@ -120,6 +120,7 @@ async def fetch_file(node_host: str, node_port: int, key: int):
             print(f"  [!] Malformed metadata: {raw}", file=sys.stderr)
             continue
         print(f"  {meta.filename} from {meta.host}:{meta.port} (size={meta.size})")
+    print("TCP connection established; file transfer completed.")
 
 def main():
     parser = argparse.ArgumentParser(description="Chord DHT CLI")

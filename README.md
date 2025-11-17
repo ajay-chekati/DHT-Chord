@@ -34,7 +34,7 @@ Nodes form a Chord ring, store key–value metadata, and support operations such
 
 4. **Publish all files in the `scripts/files` folder**
    ```bash
-   ./scripts/publish_folder.py
+   python ./scripts/publish_folder.py
    ```
 
 5. **Start nodes manually**
